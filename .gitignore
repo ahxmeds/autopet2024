@@ -1,0 +1,5 @@
+task1/monai/__pycache__/*
+task1/monai/data_analysis/__pycache__/*
+task1/monai/segmentation/__pycache__/*
+task1/monai/metrics/__pycache__/*
+task2/__pycache__/*
