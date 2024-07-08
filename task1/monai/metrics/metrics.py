@@ -23,6 +23,19 @@ def get_3darray_from_niftipath(
     array = np.transpose(sitk.GetArrayFromImage(image), (2,1,0))
     return array
 
+def get_voxel_spacing_from_niftipath(
+    path: str,
+) -> tuple:
+    """Get voxel spacing in mm of a Nifti image using the filepath
+
+    Args:
+        path (str): path of the Nifti file
+
+    Returns:
+        tuple: 3 tuple containing values in mm
+    """
+    return sitk.ReadImage(path).GetSpacing()
+    
 def calculate_patient_level_lesion_suvmean_suvmax(
     ptarray: np.ndarray, 
     maskarray: np.ndarray,

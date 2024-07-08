@@ -2,7 +2,7 @@
 Copyright (c) Microsoft Corporation. All rights reserved.
 Licensed under the MIT License.
 '''
-
+#%%
 from monai.transforms import (
     AsDiscrete,
     Compose,
@@ -20,7 +20,6 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist 
 import os
 from initialize_train import (
-    create_data_split_files,
     get_train_valid_data_in_dict_format, 
     get_train_transforms, 
     get_valid_transforms, 
@@ -29,7 +28,8 @@ from initialize_train import (
     get_optimizer, 
     get_scheduler,
     get_metric,
-    get_validation_sliding_window_size
+    get_validation_sliding_window_size,
+    get_gendicefocalloss_function
 )
 
 import sys
@@ -51,7 +51,7 @@ def load_train_objects(args):
     valid_transforms = get_valid_transforms()
     model = get_model(args.network_name, args.input_patch_size) 
     optimizer = get_optimizer(model, learning_rate=args.lr, weight_decay=args.wd)
-    loss_function = get_loss_function()
+    loss_function = get_gendicefocalloss_function() #get_loss_function()
     scheduler = get_scheduler(optimizer, args.epochs)
     metric = get_metric()
 
@@ -179,7 +179,7 @@ def main_worker(save_models_dir, save_logs_dir, args):
                         val_data['CTPT'].to(device),
                         val_data['GT'].to(device),
                     )
-                    roi_size = get_validation_sliding_window_size(args.input_patch_size) 
+                    roi_size = get_validation_sliding_window_size(args.inference_patch_size) 
                     sw_batch_size = args.sw_bs
                     val_outputs = sliding_window_inference(
                         val_inputs, roi_size, sw_batch_size, model)
@@ -213,7 +213,7 @@ def main(args):
     network = args.network_name
     inputsize = f'randcrop{args.input_patch_size}'
 
-    experiment_code = f"{network}_fold{fold}_{inputsize}_DiceLoss"
+    experiment_code = f"{network}_fold{fold}_{inputsize}_GeneralizedDiceFocalLoss"
 
     #save models folder
     save_models_dir = os.path.join(RESULTS_FOLDER,'models')
@@ -227,8 +227,8 @@ def main(args):
     
     main_worker(save_models_dir, save_logs_dir, args)
     
-
-
+    
+    
 if __name__ == "__main__": 
     parser = argparse.ArgumentParser(description='AutoPET PET/CT lesion segmentation using MONAI-PyTorch')
     parser.add_argument('--fold', type=int, default=0, metavar='fold',
@@ -237,8 +237,10 @@ if __name__ == "__main__":
                         help='network name for training (default: unet)')
     parser.add_argument('--epochs', type=int, default=500, metavar='epochs',
                         help='number of epochs to train (default: 10)')
-    parser.add_argument('--input-patch-size', type=int, default=192, metavar='inputsize',
-                        help='size of cropped input patch for training (default: 192)')
+    parser.add_argument('--input-patch-size', type=int, default=128, metavar='inputsize',
+                        help='size of cropped input patch for training (default: 128)')
+    parser.add_argument('--inference-patch-size', type=int, default=192, metavar='infsize',
+                        help='size of cropped input patch for inference (default: 192)'),
     parser.add_argument('--train-bs', type=int, default=1, metavar='train-bs',
                         help='mini-batchsize for training (default: 1)')
     parser.add_argument('--num_workers', type=int, default=2, metavar='nw',

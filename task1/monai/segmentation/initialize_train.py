@@ -9,22 +9,25 @@ from monai.transforms import (
     CropForegroundd,
     LoadImaged,
     Orientationd,
-    RandCropByPosNegLabeld,
     DeleteItemsd,
     Spacingd,
     RandAffined,
+    Rand3DElasticd,
     ConcatItemsd,
     ScaleIntensityRanged,
-    ResizeWithPadOrCropd,
+    RandSpatialCropd,
+    RandAdjustContrastd,
+    RandGaussianSharpend,
+    RandGaussianNoised,
     Invertd,
     AsDiscreted,
     SaveImaged,
-    
 )
+import torch.nn as nn 
 from monai.networks.nets import UNet#, SegResNet, DynUNet, SwinUNETR, UNETR, AttentionUnet
 from monai.networks.layers import Norm
 from monai.metrics import DiceMetric
-from monai.losses import DiceLoss
+from monai.losses import DiceLoss, GeneralizedDiceFocalLoss
 import torch
 import matplotlib.pyplot as plt
 from glob import glob 
@@ -34,6 +37,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 import os
 import json
 import sys 
+import torch.nn.functional as F
 config_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 sys.path.append(config_dir)
 from config import DATA_FOLDER, WORKING_FOLDER
@@ -48,6 +52,16 @@ def create_dictionary_ctptgt(ctpaths, ptpaths, gtpaths):
         ptpath = ptpaths[i]
         gtpath = gtpaths[i]
         data.append({'CT':ctpath, 'PT':ptpath, 'GT':gtpath})
+    return data
+
+def create_dictionary_ctptgtpr(ctpaths, ptpaths, gtpaths, prpaths):
+    data = []
+    for i in range(len(gtpaths)):
+        ctpath = ctpaths[i]
+        ptpath = ptpaths[i]
+        gtpath = gtpaths[i]
+        prpath = prpaths[i]
+        data.append({'CT':ctpath, 'PT':ptpath, 'GT':gtpath, 'PR': prpath})
     return data
 
 def remove_all_extensions(filename):
@@ -78,6 +92,21 @@ def get_train_valid_data_in_dict_format(fold):
 
     return train_data, valid_data
 
+
+def get_valid_pred_data_in_dict_format(fold, pred_folder):
+    data_split_fpath = os.path.join(WORKING_FOLDER, 'data_analysis/data_splits.json')
+    with open(data_split_fpath, 'r') as file:
+        split_data = json.load(file)
+    valid_ids = split_data[fold]['val']
+
+    ctpaths_valid = [os.path.join(DATA_FOLDER, 'imagesTr', f'{id}_0000.nii.gz') for id in valid_ids]
+    ptpaths_valid = [os.path.join(DATA_FOLDER, 'imagesTr', f'{id}_0001.nii.gz') for id in valid_ids]
+    gtpaths_valid = [os.path.join(DATA_FOLDER, 'labelsTr', f'{id}.nii.gz') for id in valid_ids]
+    prpaths_valid = [os.path.join(pred_folder, f'{id}.nii.gz') for id in valid_ids]
+
+    data = create_dictionary_ctptgtpr(ctpaths_valid, ptpaths_valid, gtpaths_valid, prpaths_valid)
+
+    return data
 #%%
 # def get_test_data_in_dict_format():
 #     test_fpaths = os.path.join(WORKING_FOLDER, 'data_split/test_filepaths.csv')
@@ -212,49 +241,87 @@ def get_model(network_name = 'unet', input_patch_size=192):
             spatial_dims=3,
             in_channels=2,
             out_channels=2,
-            channels=(16, 32, 64, 128, 256, 512),
-            strides=(2, 2, 2, 2, 2),
+            channels=(32, 64, 128, 256, 512),
+            strides=(2, 2, 2, 2),
             num_res_units=2,
             norm=Norm.BATCH
         )
-    elif network_name == 'swinunetr':
-        spatialsize = get_spatial_size(input_patch_size)
-        model = SwinUNETR(
-            img_size=spatialsize,
-            in_channels=2,
-            out_channels=2,
-            feature_size=12,
-            use_checkpoint=False,
-        )
-    elif network_name =='segresnet':
-        model = SegResNet(
-            spatial_dims=3,
-            blocks_down=[1, 2, 2, 4],
-            blocks_up=[1, 1, 1],
-            init_filters=16,
-            in_channels=2,
-            out_channels=2,
-        )
-    elif network_name == 'dynunet':
-        spatialsize = get_spatial_size(input_patch_size)
-        spacing = get_spacing()
-        krnls, strds = get_kernels_strides(spatialsize, spacing)
-        model = DynUNet(
-            spatial_dims=3,
-            in_channels=2,
-            out_channels=2,
-            kernel_size=krnls,
-            strides=strds,
-            upsample_kernel_size=strds[1:],
-        )
-    else:
-        pass
+    # elif network_name == 'swinunetr':
+    #     spatialsize = get_spatial_size(input_patch_size)
+    #     model = SwinUNETR(
+    #         img_size=spatialsize,
+    #         in_channels=2,
+    #         out_channels=2,
+    #         feature_size=12,
+    #         use_checkpoint=False,
+    #     )
+    # elif network_name =='segresnet':
+    #     model = SegResNet(
+    #         spatial_dims=3,
+    #         blocks_down=[1, 2, 2, 4],
+    #         blocks_up=[1, 1, 1],
+    #         init_filters=16,
+    #         in_channels=2,
+    #         out_channels=2,
+    #     )
+    # elif network_name == 'dynunet':
+    #     spatialsize = get_spatial_size(input_patch_size)
+    #     spacing = get_spacing()
+    #     krnls, strds = get_kernels_strides(spatialsize, spacing)
+    #     model = DynUNet(
+    #         spatial_dims=3,
+    #         in_channels=2,
+    #         out_channels=2,
+    #         kernel_size=krnls,
+    #         strides=strds,
+    #         upsample_kernel_size=strds[1:],
+    #     )
+    # else:
+    #     pass
     return model
 
-
 #%%
+class WeightedDiceLoss3D(nn.Module):
+    def __init__(self, weight_fp=1.0, weight_fn=1.0):
+        super(WeightedDiceLoss3D, self).__init__()
+        self.weight_fp = weight_fp
+        self.weight_fn = weight_fn
+    
+    def forward(self, inputs, targets, smooth=1):
+        # Apply softmax and select the foreground class (assume class 1 is the target class)
+        inputs = F.softmax(inputs, dim=1)
+        inputs = inputs[:, 1, :, :, :]
+
+        # Flatten the tensors for easier computation
+        inputs = inputs.reshape(-1)
+        targets = targets.reshape(-1)
+        
+        # Calculate intersection and union
+        intersection = (inputs * targets).sum()
+        union = inputs.sum() + targets.sum()
+        dice = (2.0 * intersection + smooth) / (union + smooth)
+
+        # Calculate false positives and false negatives
+        false_positives = (inputs * (1 - targets)).sum()
+        false_negatives = ((1 - inputs) * targets).sum()
+
+        # Calculate weighted dice loss
+        weighted_dice_loss = - dice + \
+            self.weight_fp * (false_positives / (union + smooth)) + \
+            self.weight_fn * (false_negatives / (union + smooth))
+        # weighted_dice_loss += self.weight_fp * (false_positives / (union + smooth))
+        # weighted_dice_loss += self.weight_fn * (false_negatives / (union + smooth))
+
+        return weighted_dice_loss
+#%%
+def get_gendicefocalloss_function():
+    loss_function = GeneralizedDiceFocalLoss(to_onehot_y=True, softmax=True, weight=[1., 100.], lambda_gdl=1.0, lambda_focal=1.0)
+    return loss_function
+
 def get_loss_function():
-    loss_function = DiceLoss(to_onehot_y=True, softmax=True)
+    # loss_function = DiceLoss(to_onehot_y=True, softmax=True)
+    # loss_function = GeneralizedDiceFocalLoss(to_onehot_y=True, softmax=True, weight=[1., 100.], lambda_gdl=1.0, lambda_focal=1.0)
+    loss_function = WeightedDiceLoss3D(weight_fp=100.0, weight_fn=0.0)
     return loss_function
 
 def get_optimizer(model, learning_rate=2e-4, weight_decay=1e-5):
@@ -272,3 +339,4 @@ def get_scheduler(optimizer, max_epochs=500):
 def get_validation_sliding_window_size(inference_patch_size):
     window_size = get_spatial_size(inference_patch_size)
     return window_size
+# %%
